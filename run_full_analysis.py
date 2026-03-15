@@ -246,6 +246,39 @@ def parse_sl_tp(text: str) -> tuple[float | None, float | None]:
     return sl, tp
 
 
+def parse_probabilities(text: str) -> tuple[int | None, int | None, int | None]:
+    """Extract BUY, SELL, WAIT probabilities (0-100) from analysis text."""
+    buy_m = re.search(r"\*\*BUY probability:\*\*\s*(\d+)%", text, re.IGNORECASE)
+    sell_m = re.search(r"\*\*SELL probability:\*\*\s*(\d+)%", text, re.IGNORECASE)
+    wait_m = re.search(r"\*\*WAIT probability:\*\*\s*(\d+)%", text, re.IGNORECASE)
+    buy = int(buy_m.group(1)) if buy_m else None
+    sell = int(sell_m.group(1)) if sell_m else None
+    wait = int(wait_m.group(1)) if wait_m else None
+    return buy, sell, wait
+
+
+def build_summary_table(
+    symbols_data: list[dict],
+) -> str:
+    """Build markdown table sorted by buy probability descending, then sell descending."""
+    rows = sorted(
+        symbols_data,
+        key=lambda r: (-(r.get("buy") or 0), -(r.get("sell") or 0)),
+    )
+    lines = [
+        "| Symbol | Buy % | Sell % | Wait % | Stop Loss | Take Profit |",
+        "|--------|-------|--------|--------|-----------|-------------|",
+    ]
+    for r in rows:
+        buy = f"{r['buy']}%" if r.get("buy") is not None else "-"
+        sell = f"{r['sell']}%" if r.get("sell") is not None else "-"
+        wait = f"{r['wait']}%" if r.get("wait") is not None else "-"
+        sl = f"{r['sl']:,.2f}" if r.get("sl") is not None else "-"
+        tp = f"{r['tp']:,.2f}" if r.get("tp") is not None else "-"
+        lines.append(f"| {r['symbol']} | {buy} | {sell} | {wait} | {sl} | {tp} |")
+    return "\n".join(lines)
+
+
 def create_single_asset_plot(
     data: list[dict], symbol: str, out_path: Path, sl: float | None = None, tp: float | None = None
 ):
@@ -306,6 +339,17 @@ def main():
     btc_md, eth_md = parse_analysis_sections(analysis)
     btc_sl, btc_tp = parse_sl_tp(btc_md)
     eth_sl, eth_tp = parse_sl_tp(eth_md)
+    btc_buy, btc_sell, btc_wait = parse_probabilities(btc_md)
+    eth_buy, eth_sell, eth_wait = parse_probabilities(eth_md)
+
+    # 4b. Build and save summary table (sorted by buy descending, then sell descending)
+    symbols_data = [
+        {"symbol": "BTC", "buy": btc_buy, "sell": btc_sell, "wait": btc_wait, "sl": btc_sl, "tp": btc_tp},
+        {"symbol": "ETH", "buy": eth_buy, "sell": eth_sell, "wait": eth_wait, "sl": eth_sl, "tp": eth_tp},
+    ]
+    summary_md = "# Trading Summary\n\n" + build_summary_table(symbols_data)
+    (OUTPUT_DIR / "summary.md").write_text(summary_md)
+    print("\nSaved summary.md")
 
     # 5. Save separate plots with SL/TP lines
     create_single_asset_plot(btc, "BTC", btc_dir / "btc_plot.png", sl=btc_sl, tp=btc_tp)
