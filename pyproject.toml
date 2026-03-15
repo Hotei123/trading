@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Trading data and analysis"
 requires-python = ">=3.12"
 dependencies = [
+    "requests",
     "numpy",
     "pandas",
     "matplotlib",
+    "openai>=2.28.0",
+    "python-dotenv>=1.2.2",
 ]
