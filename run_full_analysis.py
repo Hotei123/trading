@@ -136,12 +136,16 @@ Respond with two sections, one for each asset. Use this exact format:
 **BUY probability:** X% - [brief reason]
 **SELL probability:** X% - [brief reason]
 **WAIT probability:** X% - [brief reason]
+**Stop loss:** [price in USD, e.g. 71000]
+**Take profit:** [price in USD, e.g. 73500]
 **Explanation:** [2-4 sentences for BTC]
 
 ## ETH
 **BUY probability:** X% - [brief reason]
 **SELL probability:** X% - [brief reason]
 **WAIT probability:** X% - [brief reason]
+**Stop loss:** [price in USD, e.g. 2050]
+**Take profit:** [price in USD, e.g. 2250]
 **Explanation:** [2-4 sentences for ETH]
 """
 
@@ -169,13 +173,30 @@ def parse_analysis_sections(analysis: str) -> tuple[str, str]:
     return btc_md, eth_md
 
 
-def create_single_asset_plot(data: list[dict], symbol: str, out_path: str):
-    """Create candlestick + volume plot for one asset (no text overlay)."""
+def parse_sl_tp(text: str) -> tuple[float | None, float | None]:
+    """Extract stop loss and take profit prices from analysis text. Returns (sl, tp)."""
+    sl_match = re.search(r"\*\*Stop loss:\*\*\s*\$?([\d,.]+)", text, re.IGNORECASE)
+    tp_match = re.search(r"\*\*Take profit:\*\*\s*\$?([\d,.]+)", text, re.IGNORECASE)
+    sl = float(sl_match.group(1).replace(",", "")) if sl_match else None
+    tp = float(tp_match.group(1).replace(",", "")) if tp_match else None
+    return sl, tp
+
+
+def create_single_asset_plot(
+    data: list[dict], symbol: str, out_path: Path, sl: float | None = None, tp: float | None = None
+):
+    """Create candlestick + volume plot for one asset (no text overlay). Optionally draw SL/TP lines."""
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={"height_ratios": [2, 1]})
     date_fmt = mdates.DateFormatter("%d %b %H:%M")
 
     ax1, ax2 = axes[0], axes[1]
     plot_candlestick(ax1, data)
+    if sl is not None:
+        ax1.axhline(y=sl, color="#ef5350", linestyle="--", linewidth=1.5, alpha=0.8, label=f"Stop loss: {sl:,.2f}")
+    if tp is not None:
+        ax1.axhline(y=tp, color="#26a69a", linestyle="--", linewidth=1.5, alpha=0.8, label=f"Take profit: {tp:,.2f}")
+    if sl is not None or tp is not None:
+        ax1.legend(loc="upper left", fontsize=8)
     ax1.set_title(f"{symbol} Price (H1)")
     ax1.set_ylabel("Price (USD)")
     ax1.xaxis.set_major_formatter(date_fmt)
@@ -210,29 +231,33 @@ def main():
     btc = load_csv(btc_dir / "btc_hourly_120h.csv")
     eth = load_csv(eth_dir / "eth_hourly_120h.csv")
 
-    # 3. Save separate plots (no text overlay)
-    create_single_asset_plot(btc, "BTC", btc_dir / "btc_plot.png")
-    create_single_asset_plot(eth, "ETH", eth_dir / "eth_plot.png")
-    print("Saved btc_plot.png, eth_plot.png")
-
-    # 4. Call OpenAI
+    # 3. Call OpenAI
     data_summary = build_summary_for_openai(btc, eth)
     print("\nCalling OpenAI API...")
     analysis = ask_openai(data_summary)
     print("\n--- OpenAI Analysis ---\n")
     print(analysis)
 
-    # 5. Export separate Markdown files
+    # 4. Parse analysis and SL/TP
     btc_md, eth_md = parse_analysis_sections(analysis)
+    btc_sl, btc_tp = parse_sl_tp(btc_md)
+    eth_sl, eth_tp = parse_sl_tp(eth_md)
+
+    # 5. Save separate plots with SL/TP lines
+    create_single_asset_plot(btc, "BTC", btc_dir / "btc_plot.png", sl=btc_sl, tp=btc_tp)
+    create_single_asset_plot(eth, "ETH", eth_dir / "eth_plot.png", sl=eth_sl, tp=eth_tp)
+    print("Saved btc_plot.png, eth_plot.png")
+
+    # 6. Export separate Markdown files
     (btc_dir / "btc_analysis.md").write_text(btc_md)
     (eth_dir / "eth_analysis.md").write_text(eth_md)
-    print("\nSaved btc_analysis.md, eth_analysis.md")
+    print("\nSaved btc_analysis.md, eth_analysis.md (with stop loss and take profit)")
     print("Done.")
 
 
 # TODO: extend the download time to the last 200 hours
 # TODO: add the symbols open in MT5
 # TODO: export a summary markdown table with decreasing probability of buy/sell
-
+# TODO: run the script automaticlly every hour. 
 if __name__ == "__main__":
     main()
