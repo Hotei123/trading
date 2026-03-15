@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download crypto hourly OHLCV data for the last 12 hours from Binance."""
+"""Download crypto hourly OHLCV data for the last 120 hours from Binance."""
 
 import csv
 import sys
@@ -8,7 +8,7 @@ from datetime import datetime
 
 API_URL = "https://api.binance.com/api/v3/klines"
 INTERVAL = "1h"
-LIMIT = 12
+LIMIT = 120
 
 def main():
     symbol = (sys.argv[1] if len(sys.argv) > 1 else "BTC").upper()
@@ -24,7 +24,7 @@ def main():
     klines = resp.json()
 
     base = symbol.replace("USDT", "").lower()
-    out_path = f"{base}_hourly_12h.csv"
+    out_path = f"{base}_hourly_120h.csv"
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "datetime", "open", "high", "low", "close", "volume"])

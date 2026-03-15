@@ -65,8 +65,8 @@ def plot_candlestick(ax, data, width_hours=0.6):
 
 
 def main():
-    btc = load_csv("btc_hourly_12h.csv")
-    eth = load_csv("eth_hourly_12h.csv")
+    btc = load_csv("btc_hourly_120h.csv")
+    eth = load_csv("eth_hourly_120h.csv")
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), gridspec_kw={"height_ratios": [2, 1]})
     date_fmt = mdates.DateFormatter("%d %b %H:%M")
