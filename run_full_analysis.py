@@ -7,6 +7,9 @@ and export separate plots and Markdown analysis files per asset.
 import csv
 import re
 from datetime import datetime, timezone
+from pathlib import Path
+
+OUTPUT_DIR = Path("output")
 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -24,7 +27,7 @@ INTERVAL = "1h"
 LIMIT = 120
 
 
-def download_symbol(symbol: str) -> str:
+def download_symbol(symbol: str, output_dir: Path) -> Path:
     """Download hourly OHLCV data for the last 120 hours. Returns output path."""
     sym = symbol.upper()
     if not sym.endswith("USDT"):
@@ -35,7 +38,7 @@ def download_symbol(symbol: str) -> str:
     klines = resp.json()
 
     base = sym.replace("USDT", "").lower()
-    out_path = f"{base}_hourly_120h.csv"
+    out_path = output_dir / f"{base}_hourly_120h.csv"
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "datetime", "open", "high", "low", "close", "volume"])
@@ -194,17 +197,22 @@ def create_single_asset_plot(data: list[dict], symbol: str, out_path: str):
 
 
 def main():
+    btc_dir = OUTPUT_DIR / "btc"
+    eth_dir = OUTPUT_DIR / "eth"
+    btc_dir.mkdir(parents=True, exist_ok=True)
+    eth_dir.mkdir(parents=True, exist_ok=True)
+
     # 1. Download data
-    download_symbol("BTC")
-    download_symbol("ETH")
+    download_symbol("BTC", btc_dir)
+    download_symbol("ETH", eth_dir)
 
     # 2. Load and build plot data
-    btc = load_csv("btc_hourly_120h.csv")
-    eth = load_csv("eth_hourly_120h.csv")
+    btc = load_csv(btc_dir / "btc_hourly_120h.csv")
+    eth = load_csv(eth_dir / "eth_hourly_120h.csv")
 
     # 3. Save separate plots (no text overlay)
-    create_single_asset_plot(btc, "BTC", "btc_plot.png")
-    create_single_asset_plot(eth, "ETH", "eth_plot.png")
+    create_single_asset_plot(btc, "BTC", btc_dir / "btc_plot.png")
+    create_single_asset_plot(eth, "ETH", eth_dir / "eth_plot.png")
     print("Saved btc_plot.png, eth_plot.png")
 
     # 4. Call OpenAI
@@ -216,10 +224,8 @@ def main():
 
     # 5. Export separate Markdown files
     btc_md, eth_md = parse_analysis_sections(analysis)
-    with open("btc_analysis.md", "w") as f:
-        f.write(btc_md)
-    with open("eth_analysis.md", "w") as f:
-        f.write(eth_md)
+    (btc_dir / "btc_analysis.md").write_text(btc_md)
+    (eth_dir / "eth_analysis.md").write_text(eth_md)
     print("\nSaved btc_analysis.md, eth_analysis.md")
     print("Done.")
 
