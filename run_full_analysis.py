@@ -323,10 +323,11 @@ def parse_probabilities(text: str) -> tuple[int | None, int | None, int | None]:
 def build_summary_table(
     symbols_data: list[dict],
 ) -> str:
-    """Build markdown table sorted by buy probability descending, then sell descending."""
+    """Build markdown table sorted by max(buy, sell) descending, then by config order for ties."""
+    config_order = {c[0]: i for i, c in enumerate(SYMBOL_CONFIG)}
     rows = sorted(
         symbols_data,
-        key=lambda r: (-(r.get("buy") or 0), -(r.get("sell") or 0)),
+        key=lambda r: (-(max(r.get("buy") or 0, r.get("sell") or 0)), config_order.get(r["symbol"], 999)),
     )
     lines = [
         "| Symbol | Buy % | Sell % | Wait % | Stop Loss | Take Profit |",
