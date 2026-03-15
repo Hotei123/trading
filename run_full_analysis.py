@@ -230,5 +230,9 @@ def main():
     print("Done.")
 
 
+# TODO: extend the download time to the last 200 hours
+# TODO: add the symbols open in MT5
+# TODO: export a summary markdown table with decreasing probability of buy/sell
+
 if __name__ == "__main__":
     main()
