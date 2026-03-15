@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""Download BTC hourly OHLCV data for the last 12 hours from Binance."""
+"""Download crypto hourly OHLCV data for the last 12 hours from Binance."""
 
 import csv
+import sys
 import requests
 from datetime import datetime
 
 API_URL = "https://api.binance.com/api/v3/klines"
-SYMBOL = "BTCUSDT"
 INTERVAL = "1h"
 LIMIT = 12
 
 def main():
+    symbol = (sys.argv[1] if len(sys.argv) > 1 else "BTC").upper()
+    if not symbol.endswith("USDT"):
+        symbol = f"{symbol}USDT"
+
     resp = requests.get(API_URL, params={
-        "symbol": SYMBOL,
+        "symbol": symbol,
         "interval": INTERVAL,
         "limit": LIMIT,
     })
     resp.raise_for_status()
     klines = resp.json()
 
-    out_path = "btc_hourly_12h.csv"
+    base = symbol.replace("USDT", "").lower()
+    out_path = f"{base}_hourly_12h.csv"
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "datetime", "open", "high", "low", "close", "volume"])
