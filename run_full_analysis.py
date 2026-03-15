@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download BTC/ETH hourly data (120h), plot, ask OpenAI for buy/sell/wait analysis,
+Download BTC/ETH hourly data (200h), plot, ask OpenAI for buy/sell/wait analysis,
 and export separate plots and Markdown analysis files per asset.
 """
 
@@ -24,30 +24,94 @@ COLOR_DOWN = "#ef5350"
 
 API_URL = "https://api.binance.com/api/v3/klines"
 INTERVAL = "1h"
-LIMIT = 120
+HOURS_LIMIT = 200
+HOUR_MS = 3600 * 1000
+
+
+def _kline_to_row(k: list) -> tuple[int, str, str, str, str, str, str]:
+    ts_ms, o, h, l, c, v = int(k[0]), k[1], k[2], k[3], k[4], k[5]
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return (ts_ms, str(ts_ms), dt, o, h, l, c, v)
+
+
+def _load_existing_csv(path: Path) -> list[tuple[int, str, str, str, str, str, str]] | None:
+    """Load existing CSV and return rows as (ts_ms, ts_str, dt, o, h, l, c, v). Returns None if file missing."""
+    if not path.exists():
+        return None
+    rows = []
+    with open(path) as f:
+        r = csv.DictReader(f)
+        for row in r:
+            ts_ms = int(row["timestamp"])
+            rows.append((ts_ms, row["timestamp"], row["datetime"], row["open"], row["high"], row["low"], row["close"], row["volume"]))
+    return rows if rows else None
 
 
 def download_symbol(symbol: str, output_dir: Path) -> Path:
-    """Download hourly OHLCV data for the last 120 hours. Returns output path."""
+    """Download hourly OHLCV data for the last 200 hours. Fetches only missing candles if file exists."""
     sym = symbol.upper()
     if not sym.endswith("USDT"):
         sym = f"{sym}USDT"
 
-    resp = requests.get(API_URL, params={"symbol": sym, "interval": INTERVAL, "limit": LIMIT})
-    resp.raise_for_status()
-    klines = resp.json()
-
     base = sym.replace("USDT", "").lower()
-    out_path = output_dir / f"{base}_hourly_120h.csv"
+    out_path = output_dir / f"{base}_hourly_200h.csv"
+
+    # Support migration from old 120h filename
+    legacy_path = output_dir / f"{base}_hourly_120h.csv"
+    existing = _load_existing_csv(out_path) or _load_existing_csv(legacy_path)
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    current_hour_start = (now_ms // HOUR_MS) * HOUR_MS
+
+    if existing is None:
+        resp = requests.get(API_URL, params={"symbol": sym, "interval": INTERVAL, "limit": HOURS_LIMIT})
+        resp.raise_for_status()
+        klines = resp.json()
+        rows = [_kline_to_row(k) for k in klines]
+        total = len(rows)
+    else:
+        rows = list(existing)
+        oldest_ts = rows[0][0]
+        newest_ts = rows[-1][0]
+        need_older = max(0, HOURS_LIMIT - len(rows))
+        need_newer = max(0, (current_hour_start - newest_ts) // HOUR_MS)
+
+        if need_older > 0:
+            resp = requests.get(
+                API_URL,
+                params={"symbol": sym, "interval": INTERVAL, "endTime": oldest_ts - 1, "limit": need_older},
+            )
+            resp.raise_for_status()
+            older = [_kline_to_row(k) for k in resp.json()]
+            rows = sorted(older + rows, key=lambda r: r[0])
+
+        if need_newer > 0:
+            start_ts = newest_ts + HOUR_MS
+            resp = requests.get(
+                API_URL,
+                params={"symbol": sym, "interval": INTERVAL, "startTime": start_ts, "limit": need_newer},
+            )
+            resp.raise_for_status()
+            newer = [_kline_to_row(k) for k in resp.json()]
+            rows = sorted(rows + newer, key=lambda r: r[0])
+
+        # Deduplicate by timestamp
+        seen = set()
+        unique = []
+        for r in rows:
+            if r[0] not in seen:
+                seen.add(r[0])
+                unique.append(r)
+        rows = unique[-HOURS_LIMIT:]  # Keep last 200
+        total = len(rows)
+
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "datetime", "open", "high", "low", "close", "volume"])
-        for k in klines:
-            ts_ms, o, h, l, c, v = k[0], k[1], k[2], k[3], k[4], k[5]
-            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            writer.writerow([ts_ms, dt, o, h, l, c, v])
+        for r in rows:
+            writer.writerow([r[1], r[2], r[3], r[4], r[5], r[6], r[7]])
 
-    print(f"Downloaded {len(klines)} hourly candles to {out_path}")
+    print(f"Saved {total} hourly candles to {out_path}")
     return out_path
 
 
@@ -106,12 +170,12 @@ def build_summary_for_openai(btc: list[dict], eth: list[dict]) -> str:
         high_120 = max(r["high"] for r in data)
         return (
             f"{name}: Open={first['open']:.2f}, Close={last['close']:.2f}, "
-            f"Low(120h)={low_120:.2f}, High(120h)={high_120:.2f}, "
+            f"Low(200h)={low_120:.2f}, High(200h)={high_120:.2f}, "
             f"Range: {first['datetime']} - {last['datetime']}"
         )
 
     lines = [
-        "Hourly OHLCV data for the last 120 hours:",
+        "Hourly OHLCV data for the last 200 hours:",
         stats(btc, "BTC"),
         stats(eth, "ETH"),
         "",
@@ -126,7 +190,7 @@ def ask_openai(data_summary: str) -> str:
     load_dotenv()
     client = OpenAI()
 
-    prompt = f"""You are a crypto trading analyst. Based on the following BTC and ETH hourly data (last 120 hours), assess whether there is any worthwhile probability for a successful BUY, SELL, or WAIT decision.
+    prompt = f"""You are a crypto trading analyst. Based on the following BTC and ETH hourly data (last 200 hours), assess whether there is any worthwhile probability for a successful BUY, SELL, or WAIT decision.
 
 {data_summary}
 
@@ -228,8 +292,8 @@ def main():
     download_symbol("ETH", eth_dir)
 
     # 2. Load and build plot data
-    btc = load_csv(btc_dir / "btc_hourly_120h.csv")
-    eth = load_csv(eth_dir / "eth_hourly_120h.csv")
+    btc = load_csv(btc_dir / "btc_hourly_200h.csv")
+    eth = load_csv(eth_dir / "eth_hourly_200h.csv")
 
     # 3. Call OpenAI
     data_summary = build_summary_for_openai(btc, eth)
@@ -255,7 +319,6 @@ def main():
     print("Done.")
 
 
-# TODO: extend the download time to the last 200 hours
 # TODO: add the symbols open in MT5
 # TODO: export a summary markdown table with decreasing probability of buy/sell
 # TODO: run the script automaticlly every hour. 
