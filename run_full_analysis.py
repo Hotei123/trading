@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Download BTC/ETH/EURUSD hourly data (200h), plot, ask OpenAI for buy/sell/wait analysis,
+Download multi-asset hourly data (200h), plot, ask OpenAI for buy/sell/wait analysis,
 and export separate plots and Markdown analysis files per asset.
 """
 
@@ -28,6 +28,26 @@ API_URL = "https://api.binance.com/api/v3/klines"
 INTERVAL = "1h"
 HOURS_LIMIT = 200
 HOUR_MS = 3600 * 1000
+
+# Symbol config: (display_name, source, yfinance_ticker or None for Binance)
+# Forex/rates use 4 decimals; crypto/futures use 2
+SYMBOL_CONFIG = [
+    ("BTC", "binance", None),
+    ("ETH", "binance", None),
+    ("EURUSD", "yfinance", "EURUSD=X"),
+    ("GBPUSD", "yfinance", "GBPUSD=X"),
+    ("USDJPY", "yfinance", "JPY=X"),
+    ("NQ", "yfinance", "NQ=F"),
+    ("ES", "yfinance", "ES=F"),
+    ("CL", "yfinance", "CL=F"),
+    ("YM", "yfinance", "YM=F"),
+    ("XAUUSD", "yfinance", "GC=F"),  # Gold futures (XAUUSD spot not on Yahoo)
+    ("FDAX", "yfinance", "^GDAXI"),  # DAX index (FDAX futures proxy)
+    ("NIY", "yfinance", "^N225"),   # Nikkei 225 index
+    ("COFFEE", "yfinance", "KC=F"),
+    ("SOYBEAN", "yfinance", "ZS=F"),
+]
+FOREX_RATE_SYMBOLS = frozenset({"EURUSD", "GBPUSD", "USDJPY"})  # use 4 decimals (rates)
 
 
 def _kline_to_row(k: list) -> tuple[int, str, str, str, str, str, str]:
@@ -117,11 +137,9 @@ def download_symbol(symbol: str, output_dir: Path) -> Path:
     return out_path
 
 
-def download_forex(pair: str, output_dir: Path) -> Path:
-    """Download forex hourly OHLCV for the last 200 hours via yfinance. Returns output path."""
-    pair = pair.upper().replace("/", "")
-    ticker = f"{pair}=X" if "=" not in pair else pair  # EURUSD -> EURUSD=X
-    base = pair.replace("=X", "").lower()
+def download_yfinance(symbol: str, ticker: str, output_dir: Path) -> Path:
+    """Download hourly OHLCV for the last 200 hours via yfinance. Returns output path."""
+    base = symbol.lower().replace("/", "").replace("^", "")
     out_path = output_dir / f"{base}_hourly_200h.csv"
 
     end = datetime.now(timezone.utc)
@@ -129,7 +147,7 @@ def download_forex(pair: str, output_dir: Path) -> Path:
 
     df = yf.download(ticker, start=start, end=end, interval="1h", progress=False, auto_adjust=True)
     if df.empty or len(df) < 2:
-        raise RuntimeError(f"No data returned for {ticker}")
+        raise RuntimeError(f"No data returned for {ticker} ({symbol})")
 
     # Flatten MultiIndex columns if present (e.g. from single-ticker download)
     if isinstance(df.columns, pd.MultiIndex):
@@ -205,7 +223,7 @@ def plot_candlestick(ax, data, width_hours=0.6):
 def build_summary_for_openai(assets: dict[str, list[dict]]) -> str:
     """Build a concise summary of the data for the OpenAI prompt."""
     def fmt_val(v: float, name: str) -> str:
-        return f"{v:.4f}" if name == "EURUSD" else f"{v:.2f}"
+        return f"{v:.4f}" if name in FOREX_RATE_SYMBOLS else f"{v:.2f}"
 
     def stats(data: list[dict], name: str) -> str:
         first, last = data[0], data[-1]
@@ -233,10 +251,10 @@ def ask_openai(data_summary: str, symbols: list[str]) -> str:
 
     sections = []
     for sym in symbols:
-        if sym == "EURUSD":
-            sl_tp_hint = "**Stop loss:** [exchange rate, e.g. 1.0650]\n**Take profit:** [exchange rate, e.g. 1.0950]"
+        if sym in FOREX_RATE_SYMBOLS:
+            sl_tp_hint = "**Stop loss:** [rate, e.g. 1.0650]\n**Take profit:** [rate, e.g. 1.0950]"
         else:
-            sl_tp_hint = "**Stop loss:** [price in USD, e.g. 71000]\n**Take profit:** [price in USD, e.g. 73500]"
+            sl_tp_hint = "**Stop loss:** [price in USD]\n**Take profit:** [price in USD]"
         sections.append(
             f"## {sym}\n"
             f"**BUY probability:** X% - [brief reason]\n"
@@ -246,7 +264,10 @@ def ask_openai(data_summary: str, symbols: list[str]) -> str:
             f"**Explanation:** [2-4 sentences for {sym}]"
         )
 
-    prompt = f"""You are a trading analyst. Based on the following hourly data (last 200 hours), assess whether there is any worthwhile probability for a successful BUY, SELL, or WAIT decision for each asset. For forex (EURUSD), BUY means going long EUR (short USD), SELL means going short EUR.
+    prompt = f"""You are a trading analyst. Based on the following hourly data (last 200 hours), assess whether there is any worthwhile probability for a successful BUY, SELL, or WAIT decision for each asset.
+- For forex (EURUSD, GBPUSD, USDJPY): BUY = long base currency, SELL = short base currency.
+- For XAUUSD (gold): BUY = long gold, SELL = short gold.
+- For futures (NQ, ES, CL, YM, FDAX, NIY, COFFEE, SOYBEAN): BUY = long, SELL = short.
 
 {data_summary}
 
@@ -258,7 +279,7 @@ Respond with one section per asset. Use this exact format:
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1000,
+        max_tokens=4000,
     )
     return response.choices[0].message.content
 
@@ -267,11 +288,12 @@ def parse_analysis_sections(analysis: str, symbols: list[str]) -> dict[str, str]
     """Split analysis into sections per symbol. Returns {symbol: md}."""
     parts = re.split(r"(?m)^##\s+", analysis.strip())
     result = {}
+    syms_sorted = sorted(symbols, key=len, reverse=True)  # match longer first (e.g. USDJPY before USD)
     for p in parts:
         p = p.strip()
         if not p:
             continue
-        for sym in symbols:
+        for sym in syms_sorted:
             if p.upper().startswith(sym.upper()):
                 result[sym] = "## " + p
                 break
@@ -314,8 +336,9 @@ def build_summary_table(
         buy = f"{r['buy']}%" if r.get("buy") is not None else "-"
         sell = f"{r['sell']}%" if r.get("sell") is not None else "-"
         wait = f"{r['wait']}%" if r.get("wait") is not None else "-"
-        sl = f"{r['sl']:,.4f}" if r.get("sl") is not None and r.get("symbol") == "EURUSD" else (f"{r['sl']:,.2f}" if r.get("sl") is not None else "-")
-        tp = f"{r['tp']:,.4f}" if r.get("tp") is not None and r.get("symbol") == "EURUSD" else (f"{r['tp']:,.2f}" if r.get("tp") is not None else "-")
+        use_4dec = r.get("symbol") in FOREX_RATE_SYMBOLS
+        sl = f"{r['sl']:,.4f}" if r.get("sl") is not None and use_4dec else (f"{r['sl']:,.2f}" if r.get("sl") is not None else "-")
+        tp = f"{r['tp']:,.4f}" if r.get("tp") is not None and use_4dec else (f"{r['tp']:,.2f}" if r.get("tp") is not None else "-")
         lines.append(f"| {r['symbol']} | {buy} | {sell} | {wait} | {sl} | {tp} |")
     return "\n".join(lines)
 
@@ -326,7 +349,7 @@ def create_single_asset_plot(
     """Create candlestick + volume plot for one asset (no text overlay). Optionally draw SL/TP lines."""
     fig, axes = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={"height_ratios": [2, 1]})
     date_fmt = mdates.DateFormatter("%d %b %H:%M")
-    is_forex = symbol in ("EURUSD", "EUR/USD")
+    is_forex = symbol in FOREX_RATE_SYMBOLS
 
     ax1, ax2 = axes[0], axes[1]
     plot_candlestick(ax1, data)
@@ -356,37 +379,42 @@ def create_single_asset_plot(
     plt.close()
 
 
-SYMBOLS = ["BTC", "ETH", "EURUSD"]
-
-
 def main():
-    dirs = {s: OUTPUT_DIR / s.lower() for s in SYMBOLS}
+    symbols = [c[0] for c in SYMBOL_CONFIG]
+    dirs = {s: OUTPUT_DIR / s.lower().replace("/", "").replace("^", "") for s in symbols}
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
     # 1. Download data
-    download_symbol("BTC", dirs["BTC"])
-    download_symbol("ETH", dirs["ETH"])
-    download_forex("EURUSD", dirs["EURUSD"])
+    for sym, source, ticker in SYMBOL_CONFIG:
+        out_dir = dirs[sym]
+        if source == "binance":
+            download_symbol(sym, out_dir)
+        else:
+            try:
+                download_yfinance(sym, ticker, out_dir)
+            except Exception as e:
+                print(f"Warning: {sym} ({ticker}): {e}")
 
-    # 2. Load and build plot data
-    assets = {
-        "BTC": load_csv(dirs["BTC"] / "btc_hourly_200h.csv"),
-        "ETH": load_csv(dirs["ETH"] / "eth_hourly_200h.csv"),
-        "EURUSD": load_csv(dirs["EURUSD"] / "eurusd_hourly_200h.csv"),
-    }
+    # 2. Load and build plot data (only successfully downloaded)
+    assets = {}
+    for sym, source, ticker in SYMBOL_CONFIG:
+        base = sym.lower().replace("/", "").replace("^", "")
+        csv_path = dirs[sym] / f"{base}_hourly_200h.csv"
+        if csv_path.exists():
+            assets[sym] = load_csv(csv_path)
 
     # 3. Call OpenAI
     data_summary = build_summary_for_openai(assets)
     print("\nCalling OpenAI API...")
-    analysis = ask_openai(data_summary, SYMBOLS)
+    analysis = ask_openai(data_summary, list(assets.keys()))
     print("\n--- OpenAI Analysis ---\n")
     print(analysis)
 
     # 4. Parse analysis and SL/TP
-    sections = parse_analysis_sections(analysis, SYMBOLS)
+    sections = parse_analysis_sections(analysis, list(assets.keys()))
     symbols_data = []
-    for sym in SYMBOLS:
+    for sym in assets:
         md = sections.get(sym, "")
         sl, tp = parse_sl_tp(md)
         buy, sell, wait = parse_probabilities(md)
@@ -398,14 +426,14 @@ def main():
     print("\nSaved summary.md")
 
     # 5. Save separate plots with SL/TP lines
-    for sym in SYMBOLS:
+    for sym in assets:
         data = assets[sym]
         sd = next(r for r in symbols_data if r["symbol"] == sym)
         create_single_asset_plot(data, sym, dirs[sym] / f"{sym.lower()}_plot.png", sl=sd["sl"], tp=sd["tp"])
     print("Saved plots")
 
     # 6. Export separate Markdown files
-    for sym in SYMBOLS:
+    for sym in assets:
         (dirs[sym] / f"{sym.lower()}_analysis.md").write_text(sections.get(sym, ""))
     print("Saved analysis markdown files")
     print("Done.")
